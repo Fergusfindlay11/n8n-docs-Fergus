@@ -1,0 +1,1357 @@
+{
+  "name": "Commercial real estate email router",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 0,
+              "minute": 0,
+              "second": 0,
+              "hourMode": "custom",
+              "minuteMode": "custom",
+              "secondMode": "custom",
+              "mode": "everyX",
+              "every": 5,
+              "unit": "minutes"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 2,
+      "position": [
+        -860,
+        -80
+      ],
+      "id": "0f85d7d0-19e2-4fd7-94d7-0f3a5c62a649",
+      "name": "Poll inbox every 5 min"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "resource": "message",
+        "returnAll": true,
+        "filters": {
+          "filter": "isRead eq false",
+          "select": "id,conversationId,internetMessageId,subject,from,bodyPreview,body,isRead,receivedDateTime",
+          "top": 25
+        },
+        "options": {
+          "rawData": true
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        -620,
+        -80
+      ],
+      "id": "88ec65d3-2ff7-4dd2-a6a7-77413561d8aa",
+      "name": "Get unread messages"
+    },
+    {
+      "parameters": {
+        "functionCode": "const staticData = getWorkflowStaticData('global');\nconst seen = new Set(staticData.seenIds || []);\nconst output = [];\nfor (const item of items) {\n  const id = item.json.internetMessageId || item.json.id;\n  if (!id) continue;\n  if (!seen.has(id)) {\n    seen.add(id);\n    output.push(item);\n  }\n}\nstaticData.seenIds = Array.from(seen).slice(-500);\nreturn output;"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        -420,
+        -80
+      ],
+      "id": "f020db8d-9318-4d7f-9f10-5a7a0bd1a48e",
+      "name": "Skip already seen"
+    },
+    {
+      "parameters": {
+        "functionCode": "const vipSenders = ($json.env?.vipSenders || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);\nconst urgentKeywords = ['completion','exchange','stat dec','board approval','deadline'];\nconst marketplaceDomains = ['rightmove.co.uk','egpropertylink.com','onthemarket.com'];\nconst brochureHints = ['brochure','investment memorandum','info pack','marketing deck'];\n\nreturn items.map(item => {\n  const data = item.json;\n  const fromAddress = (data.from?.emailAddress?.address || '').toLowerCase();\n  const domain = fromAddress.split('@')[1] || '';\n  const subject = (data.subject || '').toLowerCase();\n  const preview = ((data.bodyPreview || '') + ' ' + (data.body?.content || '')).toLowerCase();\n\n  let routing = 'Ambiguous';\n  let reason = 'Needs LLM review';\n  const notes = [];\n\n  if (vipSenders.includes(fromAddress)) {\n    routing = 'Instant';\n    reason = 'VIP sender';\n    notes.push('vip');\n  } else if (urgentKeywords.some(keyword => subject.includes(keyword) || preview.includes(keyword))) {\n    routing = 'Instant';\n    reason = 'Urgent keyword';\n    notes.push('urgent');\n  } else if (marketplaceDomains.some(dom => domain.endsWith(dom))) {\n    routing = 'Task';\n    reason = 'Marketplace lead';\n    notes.push('marketplace');\n  } else if (/\\b(please (confirm|review|sign|quote|schedule|revert|provide))\\b/.test(preview)) {\n    routing = 'Task';\n    reason = 'Explicit request detected';\n  } else if (subject.includes('newsletter') || preview.includes('unsubscribe')) {\n    routing = 'Sweep';\n    reason = 'Likely marketing';\n  }\n\n  const brochureType = brochureHints.some(h => preview.includes(h)) ? (subject.includes('investment') ? 'Investment' : 'Marketing') : undefined;\n\n  return {\n    json: {\n      ...data,\n      routing,\n      reason,\n      notes,\n      brochureType,\n      receivedDateTime: data.receivedDateTime,\n      needsLLM: routing === 'Ambiguous'\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        -80
+      ],
+      "id": "5157f93a-19ac-4316-9b65-0c6e2e2a6540",
+      "name": "Apply fast routing rules"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.needsLLM }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        20,
+        -80
+      ],
+      "id": "6f772155-42e7-4a09-95a3-76ce2992d0a1",
+      "name": "Needs LLM?"
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "messages": {
+          "message": [
+            {
+              "id": "53150a50-17c1-4f9b-9149-e3a2f3ff2577",
+              "text": "Role: Classify an email for a UK commercial real estate broker.\\nLabels: Instant, Task, Sweep.\\nRules:\\n- Instant: VIP sender or urgent/commercial deadlines (completion, exchange, stat dec, board approval).\\n- Task: explicit ask (please confirm/provide/review/sign/quote/schedule/revert).\\n- Sweep: FYI/newsletters/marketing with no ask.\\nOutput pure JSON: {\"routing\":\"Instant|Task|Sweep\",\"reason\":\"...\"}",
+              "type": "system"
+            },
+            {
+              "id": "22d9e1db-e028-410d-b5ae-a82d393c2754",
+              "text": "Classify this email:\\nSubject: {{$json.subject}}\\nFrom: {{$json.from.emailAddress.name}} <{{$json.from.emailAddress.address}}>\\nPreview: {{$json.bodyPreview}}",
+              "type": "human"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        260,
+        -240
+      ],
+      "id": "2b44c799-401b-4cc0-8d46-04db8571fb4a",
+      "name": "LLM classifier"
+    },
+    {
+      "parameters": {
+        "functionCode": "const raw = $json.text || $json.response || $json.content || $json.output || '';\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (error) {\n  throw new Error('LLM returned non-JSON: ' + raw);\n}\nreturn [{ json: { ...$json, ...parsed, needsLLM: false } }];"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        460,
+        -240
+      ],
+      "id": "77a956f5-9349-4f55-9121-475ae81158e3",
+      "name": "Parse LLM response"
+    },
+    {
+      "parameters": {
+        "propertyName": "routing",
+        "rules": {
+          "rules": [
+            {
+              "operation": "equal",
+              "value": "Instant"
+            },
+            {
+              "operation": "equal",
+              "value": "Task"
+            },
+            {
+              "operation": "equal",
+              "value": "Sweep"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        680,
+        -80
+      ],
+      "id": "21c93d4f-df27-4de1-8f0e-673b7df3b9b0",
+      "name": "Route emails"
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "resource": "message",
+        "messageId": "={{ $json.id }}",
+        "otherOptions": {
+          "destinationId": "Today_Instant"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        940,
+        -320
+      ],
+      "id": "c06fce2f-2a51-43d8-8aa7-b9b14ba065b4",
+      "name": "Move to Today_Instant"
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "resource": "message",
+        "messageId": "={{ $json.id }}",
+        "otherOptions": {
+          "destinationId": "Task_Queue"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        940,
+        -120
+      ],
+      "id": "f3acf49e-23a9-40a6-8c5e-33d5b3780f09",
+      "name": "Move to Task_Queue"
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "resource": "message",
+        "messageId": "={{ $json.id }}",
+        "otherOptions": {
+          "destinationId": "Sweep_FYI"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        940,
+        80
+      ],
+      "id": "a43026c7-7ac4-48d4-8f73-1a2c0b98254e",
+      "name": "Move to Sweep_FYI"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ !!$json.brochureType }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        -80
+      ],
+      "id": "f7e3b9dd-6944-4af9-9e35-bf7ef3462a86",
+      "name": "Brochure detected?"
+    },
+    {
+      "parameters": {
+        "propertyName": "brochureType",
+        "rules": {
+          "rules": [
+            {
+              "operation": "equal",
+              "value": "Investment"
+            },
+            {
+              "operation": "equal",
+              "value": "Marketing"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1400,
+        -220
+      ],
+      "id": "70d3bb80-c30f-4a41-842f-b107f8cae0bf",
+      "name": "Brochure type"
+    },
+    {
+      "parameters": {
+        "operation": "copy",
+        "resource": "message",
+        "messageId": "={{ $json.id }}",
+        "folderId": "Brochures/Investment"
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        1620,
+        -320
+      ],
+      "id": "4e2b8671-5dc9-4ce8-9755-ef9f2d89887a",
+      "name": "Copy to Brochures/Investment"
+    },
+    {
+      "parameters": {
+        "operation": "copy",
+        "resource": "message",
+        "messageId": "={{ $json.id }}",
+        "folderId": "Brochures/Marketing"
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        1620,
+        -120
+      ],
+      "id": "37f9d0d3-09b2-4ad0-a9f9-8a266364af54",
+      "name": "Copy to Brochures/Marketing"
+    },
+    {
+      "parameters": {
+        "functionCode": "const text = ($json.subject || '') + ' ' + ($json.bodyPreview || '');\nconst postcodeMatch = text.match(/\\b[A-Z]{1,2}\\d[A-Z0-9]? ?\\d[A-Z]{2}\\b/i);\nconst aliases = ($json.notes || []).concat(($json.brochureType ? [$json.brochureType] : []));\nreturn [{\n  json: {\n    ...$json,\n    lookup: {\n      postcode: postcodeMatch ? postcodeMatch[0].toUpperCase() : '',\n      tokens: text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).slice(0, 25),\n      aliases\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        120
+      ],
+      "id": "a3656ab8-18b4-4ff7-92c0-0f67e03ba0c1",
+      "name": "Prepare project lookup"
+    },
+    {
+      "parameters": {
+        "operation": "list",
+        "application": "airtable",
+        "id": "Buildings",
+        "options": {
+          "view": "Grid view",
+          "filterByFormula": "={{$json.lookup.postcode ? `SEARCH(\"${$json.lookup.postcode}\", {Postcode})` : ''}}"
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 4,
+      "position": [
+        1620,
+        120
+      ],
+      "id": "f69a727f-68f3-4b29-9b55-3c51cf08c84f",
+      "name": "Fetch candidate buildings"
+    },
+    {
+      "parameters": {
+        "functionCode": "const candidates = items[0]?.json?.records || [];\nconst tokens = new Set(($input.item.json.lookup?.tokens || []));\nconst aliasHitsRequired = $json.lookup.postcode ? 1 : 2;\nlet best;\nfor (const record of candidates) {\n  const fields = record.fields || {};\n  const aliasList = (fields.Aliases || []).map(a => a.toLowerCase());\n  const hits = aliasList.filter(a => tokens.has(a)).length;\n  if (($json.lookup.postcode && fields.Postcode === $json.lookup.postcode) || hits >= aliasHitsRequired) {\n    best = { id: record.id, fields };\n    break;\n  }\n}\nreturn [{ json: { ...$json, building: best || null } }];"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        1840,
+        120
+      ],
+      "id": "b8a82c4a-3ba2-4d75-8d21-1cf3e5d6f75d",
+      "name": "Validate building match"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ !!$json.building }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        120
+      ],
+      "id": "8d5e2521-94ab-4c1f-91d1-f22646188c33",
+      "name": "Building matched?"
+    },
+    {
+      "parameters": {
+        "operation": "copy",
+        "resource": "message",
+        "messageId": "={{ $json.id }}",
+        "folderId": "={{ `Projects/${$json.building.fields.BuildingName}` }}"
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        2280,
+        40
+      ],
+      "id": "7f2c9935-d930-42c0-b7a4-6a0ca55b36ee",
+      "name": "Copy to Project folder"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8c908a02-398a-4bad-9224-83e7fd8aeb4a",
+              "name": "logPayload",
+              "value": "={{ {\n  InternetMessageId: $json.internetMessageId,\n  ConversationId: $json.conversationId,\n  From: $json.from.emailAddress.address,\n  Subject: $json.subject,\n  RoutedTo: $json.routing,\n  BuildingID: $json.building?.fields?.BuildingID || null,\n  Status: $json.routing === 'Instant' ? 'open' : 'triaged',\n  IsAutoReply: false\n} }}",
+              "type": "json"
+            },
+            {
+              "id": "3c45a4a0-fbb4-46dd-8cf5-6fa1a80d97f5",
+              "name": "shouldLog",
+              "value": "={{ $json.routing === 'Instant' || ($json.notes || []).includes('vip') || /tenancy schedule|heads of terms|wayleave|licence to alter/i.test(($json.bodyPreview || '')) }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [
+        2280,
+        220
+      ],
+      "id": "5870fdbc-fdb1-47d4-9437-7af93a88a2ef",
+      "name": "Prepare log payload"
+    },
+    {
+      "parameters": {
+        "functionCode": "const building = $json.building?.fields || {};\nconst from = ($json.from?.emailAddress?.address || '').toLowerCase();\nconst isExternal = !from.endsWith('@bbgrealestate.co.uk');\nconst hasHumanReply = ($json.body?.content || '').toLowerCase().includes('x-auto: true');\nconst template = building.AutoReplyTemplate || '';\nconst slaMinutes = building.SLA_Minutes || 120;\nconst followUpAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();\nconst shouldAutoReply = isExternal && !hasHumanReply && template;\nreturn [{ json: { ...$json, autoReplyContext: { template, slaMinutes, followUpAt }, shouldAutoReply } }];"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        2520,
+        220
+      ],
+      "id": "4db66894-9027-42f7-9561-9fd378da3e2d",
+      "name": "Auto-reply gate"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.shouldAutoReply }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2740,
+        220
+      ],
+      "id": "0f4b80cb-a8b6-49b1-b437-585ed6e5acda",
+      "name": "Auto reply?"
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "messages": {
+          "message": [
+            {
+              "id": "e4392c1f-c4d4-4da7-8ae7-6c0f46a9e0b3",
+              "type": "system",
+              "text": "Draft a concise, friendly reply for a UK commercial real estate agent. Use the template provided, fill placeholders, and keep tone professional."
+            },
+            {
+              "id": "3a03005b-b60b-4a1c-80d5-b4b0ce3bce91",
+              "type": "human",
+              "text": "Template: {{$json.autoReplyContext.template}}\\nData: {{ JSON.stringify({ building: $json.building?.fields, enquiry: { subject: $json.subject, preview: $json.bodyPreview } }) }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        2980,
+        120
+      ],
+      "id": "0ad1cdd9-3af1-4d20-9f64-62ac82f693df",
+      "name": "Draft auto-reply"
+    },
+    {
+      "parameters": {
+        "functionCode": "const text = $json.text || $json.response || '';\nconst subject = `${$json.building?.fields?.BuildingName || 'Property'} \u2014 next steps & viewings`;\nreturn [{ json: { ...$json, autoReply: { subject, body: text }, logPayload: { ...$json.logPayload, IsAutoReply: true, Status: 'awaiting-reply', FollowUpDueAt: $json.autoReplyContext.followUpAt } } }];"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        3180,
+        120
+      ],
+      "id": "789f8d6d-2c95-41cc-a45f-28a514244164",
+      "name": "Build auto-reply payload"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "resource": "draft",
+        "subject": "={{ $json.autoReply.subject }}",
+        "bodyContent": "={{ $json.autoReply.body }}",
+        "toRecipients": [
+          {
+            "email": "={{ $json.from.emailAddress.address }}",
+            "name": "={{ $json.from.emailAddress.name }}"
+          }
+        ],
+        "internetMessageHeaders": [
+          {
+            "name": "X-Auto",
+            "value": "true"
+          }
+        ],
+        "otherOptions": {
+          "sendImmediately": "={{ $json.autoReplyContext.slaMinutes <= 30 ? true : false }}"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        3380,
+        120
+      ],
+      "id": "a7ad4007-6b79-43be-99da-b2fd534b33f3",
+      "name": "Create draft / send"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "application": "airtable",
+        "id": "Email_Log",
+        "options": {
+          "updateKey": "InternetMessageId"
+        },
+        "fields": {
+          "fields": [
+            {
+              "fieldId": "InternetMessageId",
+              "fieldValue": "={{ $json.logPayload.InternetMessageId }}"
+            },
+            {
+              "fieldId": "ConversationId",
+              "fieldValue": "={{ $json.logPayload.ConversationId }}"
+            },
+            {
+              "fieldId": "From",
+              "fieldValue": "={{ $json.logPayload.From }}"
+            },
+            {
+              "fieldId": "Subject",
+              "fieldValue": "={{ $json.logPayload.Subject }}"
+            },
+            {
+              "fieldId": "RoutedTo",
+              "fieldValue": "={{ $json.logPayload.RoutedTo }}"
+            },
+            {
+              "fieldId": "BuildingID",
+              "fieldValue": "={{ $json.logPayload.BuildingID }}"
+            },
+            {
+              "fieldId": "IsAutoReply",
+              "fieldValue": "={{ $json.logPayload.IsAutoReply }}"
+            },
+            {
+              "fieldId": "FollowUpDueAt",
+              "fieldValue": "={{ $json.logPayload.FollowUpDueAt }}"
+            },
+            {
+              "fieldId": "Status",
+              "fieldValue": "={{ $json.logPayload.Status }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 4,
+      "position": [
+        3600,
+        120
+      ],
+      "id": "8dd9c95d-09f6-4fa5-b1b2-3b3442c99e13",
+      "name": "Upsert Email Log"
+    },
+    {
+      "parameters": {
+        "waitTime": {
+          "unit": "hours",
+          "value": 48
+        }
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        3820,
+        40
+      ],
+      "id": "43f7c3cc-6df8-4d7d-9df3-12f2624b0ef8",
+      "name": "Wait 48 hours"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "resource": "message",
+        "returnAll": true,
+        "filters": {
+          "filter": "={{ `conversationId eq '${$json.conversationId}'` }}",
+          "top": 10
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        4040,
+        40
+      ],
+      "id": "63c83589-32fe-4e5c-9f9b-7e9f65ca1c0f",
+      "name": "Fetch conversation"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.bodyPreview ? $json.bodyPreview.toLowerCase().includes('x-auto: true') : false }}",
+              "operation": "notEqual",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 1,
+      "position": [
+        4240,
+        40
+      ],
+      "id": "aaf78dc6-cfc0-4a69-a40a-7b1f0b2b133a",
+      "name": "Messages after auto reply"
+    },
+    {
+      "parameters": {
+        "aggregateFunction": "count"
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 2,
+      "position": [
+        4440,
+        40
+      ],
+      "id": "7df46fe8-cf64-4f80-9a73-96f8b0c1f42b",
+      "name": "Count inbound"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.count }}",
+              "operation": "equal",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4660,
+        40
+      ],
+      "id": "07cb0d2b-6f14-4240-bc35-25689490ce52",
+      "name": "No reply yet?"
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "messages": {
+          "message": [
+            {
+              "id": "71f25f53-1f0d-44c1-8f58-648aac2ef2a4",
+              "type": "system",
+              "text": "Write a short, polite follow-up email keeping the thread going. Offer two new viewing slots and invite quick reply."
+            },
+            {
+              "id": "b85fe02a-5d1f-4a82-9cf3-8a118abcb1c2",
+              "type": "human",
+              "text": "Building: {{$json.building.fields.BuildingName}}\\nSlots: {{$json.building.fields.NextViewingSlots?.slice(0,2).join(', ')}}\\nPrevious subject: {{$json.subject}}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.4
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        4880,
+        -80
+      ],
+      "id": "ea33b139-0b83-44e9-a114-520b7006f236",
+      "name": "Draft follow-up"
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "resource": "message",
+        "messageId": "={{ $json.id }}",
+        "otherOptions": {
+          "comment": "={{ $json.text || $json.response || '' }}"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        5080,
+        -80
+      ],
+      "id": "30bb586c-cd76-49f2-807a-73f079c6d1ef",
+      "name": "Send follow-up"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "application": "airtable",
+        "id": "Email_Log",
+        "fields": {
+          "fields": [
+            {
+              "fieldId": "InternetMessageId",
+              "fieldValue": "={{ $json.logPayload.InternetMessageId }}"
+            },
+            {
+              "fieldId": "Status",
+              "fieldValue": "closed"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 4,
+      "position": [
+        5280,
+        -80
+      ],
+      "id": "8b0f1cad-b0f0-48bb-b146-95ef72655dd7",
+      "name": "Close log"
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 23,
+              "minute": 0,
+              "second": 0,
+              "mode": "everyDay"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 2,
+      "position": [
+        -860,
+        360
+      ],
+      "id": "eeb571d3-4f7c-4e2f-8f93-0a45af713dec",
+      "name": "Nightly housekeeping"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "resource": "message",
+        "returnAll": true,
+        "filters": {
+          "filter": "receivedDateTime lt {{addHours(utcNow(),-48)}}",
+          "folderId": "Today_Instant"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        -620,
+        360
+      ],
+      "id": "0ae5aefe-d1a8-4b69-92ff-a685bcd0970c",
+      "name": "Fetch stale instant"
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "resource": "message",
+        "messageId": "={{ $json.id }}",
+        "otherOptions": {
+          "destinationId": "Sweep_FYI"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 1,
+      "position": [
+        -380,
+        320
+      ],
+      "id": "b1ce0df7-8feb-4d76-8e0b-5a5c0e3d85f4",
+      "name": "Archive stale instant"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "application": "airtable",
+        "id": "Email_Log",
+        "options": {
+          "view": "Grid view"
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 4,
+      "position": [
+        -620,
+        540
+      ],
+      "id": "6842b11f-fde4-4ed4-8ee0-75f5eeb7b798",
+      "name": "Fetch logs"
+    },
+    {
+      "parameters": {
+        "functionCode": "const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);\nreturn items.filter(item => {\n  const created = new Date(item.json.fields?.Created || item.json.fields?.FollowUpDueAt || Date.now());\n  return created >= ninetyDaysAgo;\n});"
+      },
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        540
+      ],
+      "id": "6af7385e-5da9-4afb-8d86-67bbd0ed8ef0",
+      "name": "Prune old logs"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "application": "airtable",
+        "id": "Email_Log",
+        "fields": {
+          "fields": [
+            {
+              "fieldId": "Status",
+              "fieldValue": "archived"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 4,
+      "position": [
+        -140,
+        540
+      ],
+      "id": "6a803851-2337-4d92-86f8-e600b6bfac7c",
+      "name": "Archive aged logs"
+    },
+    {
+      "parameters": {
+        "content": "### Configure credentials\n- Microsoft Outlook node: Connect to the shared inbox with delegated permissions.\n- Airtable node: Point to the Buildings and Email_Log tables.\n- OpenAI (or Azure OpenAI) credentials for the LLM nodes.\n\n### Static data\nThe **Skip already seen** Function node stores seen internetMessageIds in workflow static data. Reset or prune if you redeploy.\n\n### Logging rule\nOnly log VIP, critical, or Instant-routed emails as per the `Prepare log payload` node. Adjust the expression if your VIP list changes.\n\n### Follow-up search\n`Fetch conversation` searches by `conversationId`. If you reply from a shared mailbox, confirm conversation IDs remain consistent across accounts.\n\n### Nightly job\nExtend the housekeeping branch to rebuild keyword lists from misroutes (for example, query Email_Log where Status='archived' and aggregate subjects).",
+        "height": 420,
+        "width": 420,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -100,
+        -320
+      ],
+      "id": "ff066122-4352-4b65-af87-0efd64cfb640",
+      "name": "Setup notes"
+    }
+  ],
+  "connections": {
+    "Poll inbox every 5 min": {
+      "main": [
+        [
+          {
+            "node": "Get unread messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get unread messages": {
+      "main": [
+        [
+          {
+            "node": "Skip already seen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip already seen": {
+      "main": [
+        [
+          {
+            "node": "Apply fast routing rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply fast routing rules": {
+      "main": [
+        [
+          {
+            "node": "Needs LLM?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs LLM?": {
+      "main": [
+        [
+          {
+            "node": "LLM classifier",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM classifier": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM response": {
+      "main": [
+        [
+          {
+            "node": "Route emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route emails": {
+      "main": [
+        [
+          {
+            "node": "Move to Today_Instant",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Move to Task_Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Move to Sweep_FYI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Today_Instant": {
+      "main": [
+        [
+          {
+            "node": "Brochure detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Task_Queue": {
+      "main": [
+        [
+          {
+            "node": "Brochure detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Sweep_FYI": {
+      "main": [
+        [
+          {
+            "node": "Brochure detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Brochure detected?": {
+      "main": [
+        [
+          {
+            "node": "Brochure type",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare project lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Brochure type": {
+      "main": [
+        [
+          {
+            "node": "Copy to Brochures/Investment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Copy to Brochures/Marketing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Copy to Brochures/Investment": {
+      "main": [
+        [
+          {
+            "node": "Prepare project lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Copy to Brochures/Marketing": {
+      "main": [
+        [
+          {
+            "node": "Prepare project lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare project lookup": {
+      "main": [
+        [
+          {
+            "node": "Fetch candidate buildings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch candidate buildings": {
+      "main": [
+        [
+          {
+            "node": "Validate building match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate building match": {
+      "main": [
+        [
+          {
+            "node": "Building matched?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Building matched?": {
+      "main": [
+        [
+          {
+            "node": "Copy to Project folder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare log payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Copy to Project folder": {
+      "main": [
+        [
+          {
+            "node": "Prepare log payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare log payload": {
+      "main": [
+        [
+          {
+            "node": "Auto-reply gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-reply gate": {
+      "main": [
+        [
+          {
+            "node": "Auto reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto reply?": {
+      "main": [
+        [
+          {
+            "node": "Draft auto-reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Upsert Email Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft auto-reply": {
+      "main": [
+        [
+          {
+            "node": "Build auto-reply payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build auto-reply payload": {
+      "main": [
+        [
+          {
+            "node": "Create draft / send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create draft / send": {
+      "main": [
+        [
+          {
+            "node": "Upsert Email Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Email Log": {
+      "main": [
+        [
+          {
+            "node": "Wait 48 hours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 48 hours": {
+      "main": [
+        [
+          {
+            "node": "Fetch conversation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch conversation": {
+      "main": [
+        [
+          {
+            "node": "Messages after auto reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Messages after auto reply": {
+      "main": [
+        [
+          {
+            "node": "Count inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count inbound": {
+      "main": [
+        [
+          {
+            "node": "No reply yet?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No reply yet?": {
+      "main": [
+        [
+          {
+            "node": "Draft follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft follow-up": {
+      "main": [
+        [
+          {
+            "node": "Send follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send follow-up": {
+      "main": [
+        [
+          {
+            "node": "Close log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nightly housekeeping": {
+      "main": [
+        [
+          {
+            "node": "Fetch stale instant",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch stale instant": {
+      "main": [
+        [
+          {
+            "node": "Archive stale instant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch logs": {
+      "main": [
+        [
+          {
+            "node": "Prune old logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prune old logs": {
+      "main": [
+        [
+          {
+            "node": "Archive aged logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "saveExecutionProgress": true,
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "id": "CommercialRealEstateRouter",
+  "tags": [],
+  "versionId": "065cfb41-5243-4aac-9dee-6a619173f14b"
+}
