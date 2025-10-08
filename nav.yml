@@ -1324,6 +1324,7 @@ nav:
           - Let AI specify tool parameters: advanced-ai/examples/using-the-fromai-function.md
           - What is a vector database?: advanced-ai/examples/understand-vector-databases.md
           - Populate a Pinecone vector database from a website: advanced-ai/examples/vector-store-website.md
+          - Route commercial real estate email leads automatically: advanced-ai/examples/commercial-real-estate-email-router.md
   - API:
       - api/index.md
       - Authentication: api/authentication.md
